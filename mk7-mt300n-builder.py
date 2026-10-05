@@ -2,305 +2,277 @@
 # -*- coding: utf-8 -*-
 
 # Author:   <you>
-# License:  MIT License
-# Original inspiration: Naqwada (Sweet Pineapple Builder)
-# Docs:     Build WiFi Pineapple Mark VII firmware for single-radio
-#           MediaTek MT7628 devices (GL.iNet MT300N-V2 and similar).
+# License:  MIT License (http://www.opensource.org/licenses/mit-license.php)
+# Based on: Sweet-Pineapple-Builder by Naqwada (Necrum Security Labs)
+#           https://github.com/Naqwa/Sweet-Pineapple-Builder
 # Note:     FOR EDUCATIONAL PURPOSE ONLY.
+#
+# Ports WiFi Pineapple Mark VII 2.1.3-stable firmware to single-radio
+# MediaTek MT7628 routers (GL.iNet MT300N-V2, MT300N-V2 Mini, etc.).
+# Applies five portability patches and compiles with the OpenWrt 21.02.1
+# Image Builder for the `hak5_wifi-pineapple-mk7` profile.
 
 from __future__ import print_function, unicode_literals
 from termcolor import cprint
 import subprocess
 import hashlib
 import random
-import shutil
 import time
+import pwd
 import sys
 import os
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Paths — everything anchored to the script's directory
 # ---------------------------------------------------------------------------
 
-MK7_FW_URL  = ("https://storage.googleapis.com/hak5-dl.appspot.com/"
-               "wifipineapplemk7/firmwares/2.1.3-stable/"
-               "upgrade-2.1.3-stable.2022101708401.bin")
-MK7_FW_SHA  = "d8cae7ab5efa390b272f14d69c27a556b4689a47b339783e13cced73c6d1a444"
+SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+WORK_DIR    = os.path.join(SCRIPT_DIR, "cake")
+FW_BIN      = os.path.join(WORK_DIR, "mk7fw.bin")
+EXTRACT_DIR = os.path.join(WORK_DIR, "_mk7fw.bin.extracted")
+ROOTFS_DIR  = os.path.join(EXTRACT_DIR, "squashfs-root")
+OVERLAY_DIR = os.path.join(WORK_DIR, "overlay")
+IB_TARBALL  = os.path.join(WORK_DIR, "openwrt-imagebuilder.tar.xz")
+OUTPUT_DIR  = os.path.join(SCRIPT_DIR, "customFW")
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+MK7_FW_URL = ("https://storage.googleapis.com/hak5-dl.appspot.com/"
+              "wifipineapplemk7/firmwares/2.1.3-stable/"
+              "upgrade-2.1.3-stable.2022101708401.bin")
+MK7_FW_SHA = "d8cae7ab5efa390b272f14d69c27a556b4689a47b339783e13cced73c6d1a444"
 
 IB_URL = ("https://downloads.openwrt.org/releases/21.02.1/targets/"
           "ramips/mt76x8/openwrt-imagebuilder-21.02.1-ramips-mt76x8.Linux-x86_64.tar.xz")
-IB_DIR = "openwrt-imagebuilder-21.02.1-ramips-mt76x8.Linux-x86_64"
+IB_DIR_NAME = "openwrt-imagebuilder-21.02.1-ramips-mt76x8.Linux-x86_64"
+IB_DIR      = os.path.join(WORK_DIR, IB_DIR_NAME)
 
-PROFILE = "hak5_wifi-pineapple-mk7"
+PROFILE       = "hak5_wifi-pineapple-mk7"
 ROOT_PWD_HASH = "$1$TiQN6h88$b.ZEITsCk5a0UbfxvhISA1"   # password: root
 
-WORK   = os.path.abspath("./cake")
-FW_BIN = os.path.join(WORK, "mk7_fw.bin")
-EXTRACT = os.path.join(WORK, "_mk7_fw.bin.extracted")
-ROOTFS = os.path.join(EXTRACT, "squashfs-root")
-OVERLAY = os.path.join(WORK, "overlay")
-
-# Official MK7 package list, minus proprietary Hak5 packages that are
-# already inside the overlay. Anything prefixed with '-' is excluded.
-PACKAGE_LIST = " ".join([
-    "at","autossh","base-files","bash","blockd","block-mount","busybox",
-    "ca-bundle","ca-certificates","coreutils","coreutils-base64",
-    "coreutils-sleep","curl","dbus","dnsmasq","e2fsprogs","ebtables",
-    "ethtool","file","firewall","fstools","fwtool","getrandom","glib2",
-    "hostapd-common","hostapd-utils","ip6tables","iptables",
-    "iptables-mod-ipmark","iptables-mod-ipopt","iw","iwinfo","jshn",
-    "jsonfilter","kmod-bluetooth","kmod-cfg80211","kmod-crypto-aead",
-    "kmod-crypto-cmac","kmod-crypto-crc32c","kmod-crypto-ecb",
-    "kmod-crypto-ecdh","kmod-crypto-hash","kmod-crypto-kpp",
-    "kmod-crypto-manager","kmod-crypto-null","kmod-crypto-pcompress",
-    "kmod-ebtables","kmod-fs-autofs4","kmod-fs-ext4","kmod-fs-ntfs",
-    "kmod-fs-vfat","kmod-fuse","kmod-gpio-button-hotplug","kmod-hid",
-    "kmod-i2c-core","kmod-i2c-mt7628","kmod-input-core","kmod-input-evdev",
-    "kmod-ip6tables","kmod-ipt-compat-xtables","kmod-ipt-conntrack",
-    "kmod-ipt-core","kmod-ipt-ipmark","kmod-ipt-ipopt","kmod-ipt-nat",
-    "kmod-ipt-offload","kmod-leds-gpio","kmod-lib-crc16",
-    "kmod-lib-crc-ccitt","kmod-libphy","kmod-mac80211","kmod-mii",
-    "kmod-mmc","kmod-mt76","kmod-mt7601u","kmod-mt7603","kmod-mt76-core",
-    "kmod-mt76-usb","kmod-mt76x02-common","kmod-mt76x02-usb","kmod-mt76x2",
-    "kmod-mt76x2-common","kmod-mt76x2u","kmod-nf-conntrack",
-    "kmod-nf-conntrack6","kmod-nf-flow","kmod-nf-ipt","kmod-nf-ipt6",
-    "kmod-nf-nat","kmod-nf-reject","kmod-nf-reject6","kmod-nls-base",
-    "kmod-nls-cp437","kmod-nls-iso8859-1","kmod-nls-utf8","kmod-ppp",
-    "kmod-pppoe","kmod-pppox","kmod-regmap-core","kmod-scsi-core",
-    "kmod-sdhci","kmod-sdhci-mt7620","kmod-slhc","kmod-usb2",
-    "kmod-usb-acm","kmod-usb-core","kmod-usb-ehci","kmod-usb-net",
-    "kmod-usb-net-asix","kmod-usb-net-asix-ax88179",
-    "kmod-usb-net-rtl8152","kmod-usb-ohci","kmod-usb-storage",
-    "libatomic1","libattr","libblkid1","libblobmsg-json20210516",
-    "libbz2-1.0","libc","libcbor0","libcomerr0","libcurl4","libdbus",
-    "libelf1","libevdev","libexpat","libext2fs2","libffi","libfido2-1",
-    "libgcc1","libgmp10","libgnutls","libical","libip4tc2","libip6tc2",
-    "libiwinfo20210430","libiwinfo-data","libjson-c5",
-    "libjson-script20210516","liblzma","libmagic","libmbedtls12",
-    "libncurses6","libnettle8","libnghttp2-14","libnl-core200",
-    "libnl-genl200","libnl-tiny1","libopenssl1.1","libopenssl-conf",
-    "libpcap1","libpcre","libpthread","libpython3-3.9","libreadline8",
-    "librt","libsqlite3-0","libss2","libstdcpp6","libubox20210516",
-    "libubus20210630","libuci20130104","libuclient20201210",
-    "libudev-zero","libusb-1.0-0","libustream-openssl20201210",
-    "libuuid1","libxtables12","logd","macchanger","msmtp",
-    "mt7601u-firmware","mtd","nano","netifd","ntfs-3g","odhcp6c",
-    "odhcpd-ipv6only","openssh-client","openssh-client-utils",
-    "openssh-keygen","openssh-server","openssh-sftp-server",
-    "openssl-util","openwrt-keyring","opkg","ppp","ppp-mod-pppoe",
-    "procd","procps-ng","procps-ng-free","procps-ng-kill",
-    "procps-ng-pgrep","procps-ng-pkill","procps-ng-ps",
-    "procps-ng-snice","procps-ng-top","procps-ng-uptime",
-    "procps-ng-watch","protobuf-lite","python3-base","python3-codecs",
-    "python3-email","python3-light","python3-logging","python3-openssl",
-    "python3-urllib","swconfig","tcpdump","terminfo","ubox","ubus",
-    "ubusd","uci","uclibcxx","uclient-fetch","urandom-seed","urngd",
-    "usbids","usbutils","usign","vim","wireless-regdb","wireless-tools",
-    "wpad","zlib",
-    # Exclusions — these conflict with the default profile or the overlay
-    "-libustream-wolfssl","-libustream-wolfssl20201210",
-    "-wpad-basic","-wpad-basic-wolfssl","-wpad-basic-mbedtls",
-    "-wpad-wolfssl","-wpad-mbedtls",
-])
-
 # ---------------------------------------------------------------------------
-# UI helpers
+# Banner
 # ---------------------------------------------------------------------------
 
 def banner():
     logo = r"""
-                       ..
-                      .::
-              ..     .:::.
-             .::.   .:::::.
-            .::::. .:::::::.
-           .::::::.:::::::::.
-          .:::::::::::::::::::.
-         .:::::::::::::::::::::.
-         .:::::::::::::::::::::.
-          .:::::::::::::::::::.
-           ':::::::::::::::::'
-             ':::::::::::::'
-               ':::::::::'
-                 ':::::'
-                   ':
-          W I F I   P I N E A P P L E
-             M K 7  B U I L D E R
+                       .::
+                     .::::.
+                    .::::::.
+                   .::::::::.
+                  .::::::::::.
+                 .::::::::::::.
+                .::::::::::::::.
+                .::::::::::::::.
+                 .::::::::::::.
+                  .::::::::::.
+                   .::::::::.
+                    .::::::.
+                     .::::.
+                       ':
+              ,,        ,,         ,,
+              ||        ||         ||
+
+      M K 7   P O R T A B I L I T Y   B U I L D E R
+              Sweet Pineapple  v2.0.1
 """
     colors = ['red', 'green', 'cyan', 'yellow', 'blue', 'magenta']
     cprint(logo, random.choice(colors), attrs=['bold'])
-    cprint("  Mark VII portability builder for MT7628 routers\n",
-           'cyan', attrs=['bold'])
 
 
-def step(msg):
-    cprint("[*] " + msg, 'blue', attrs=['bold'])
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 
-
-def ok(msg):
-    cprint("[+] " + msg, 'green', attrs=['bold'])
-
-
-def warn(msg):
-    cprint("[!] " + msg, 'yellow', attrs=['bold'])
-
-
-def fail(msg):
-    cprint("[x] " + msg, 'red', attrs=['bold'])
-    sys.exit(1)
+def step(msg):  cprint('[+] ' + msg, 'blue',     attrs=['bold'])
+def ok(msg):    cprint('[+] ' + msg, 'green',    attrs=['bold'])
+def warn(msg):  cprint('[!] ' + msg, 'yellow',   attrs=['bold'])
+def fail(msg):  cprint('[x] ' + msg, 'red',      attrs=['bold']); sys.exit(1)
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, shell=isinstance(cmd, str), check=False, **kw)
+    return subprocess.run(cmd, shell=isinstance(cmd, str), **kw)
+
 
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
 
-def check_dependencies():
-    step("Checking host dependencies")
-    required = ["binwalk", "wget", "gawk", "git", "tar",
-                "make", "gcc", "python3", "openssl", "sasquatch"]
-    missing = [p for p in required if shutil.which(p) is None]
+def checkDependencies():
+    try:
+        cprint('[+] Checking host dependencies ...', 'blue', attrs=['bold'])
 
-    if missing:
-        warn("Missing: " + ", ".join(missing))
-        warn("Install with: sudo apt install -y binwalk wget gawk git tar "
-             "build-essential python3 openssl")
-        warn("For sasquatch, see README.md (build from source).")
-        if "sasquatch" not in missing:
-            return
-        sys.exit(1)
+        required = ["binwalk", "wget", "gawk", "git", "tar",
+                    "make", "gcc", "openssl", "sasquatch"]
+        missing = [p for p in required if not shutil_which(p)]
 
-    ok("All host dependencies present.")
+        if missing:
+            warn("Missing tools: " + ", ".join(missing))
+            cprint('    Install base deps with:', 'cyan')
+            cprint('      sudo apt install binwalk wget gawk git '
+                   'build-essential python3 openssl', 'cyan')
+            cprint('    sasquatch must be built from source:', 'cyan')
+            cprint('      https://github.com/devttys0/sasquatch', 'cyan')
+            if "sasquatch" in missing:
+                fail("Cannot continue without sasquatch.")
+            else:
+                warn("Continuing anyway — some steps may fail.")
 
-
-def download_firmware():
-    step("Downloading official Mark VII firmware (2.1.3-stable)")
-    os.makedirs(WORK, exist_ok=True)
-    if not os.path.exists(FW_BIN):
-        run(["wget", "-q", "-O", FW_BIN, MK7_FW_URL])
-    if not os.path.exists(FW_BIN):
-        fail("Download failed.")
-
-    step("Verifying SHA256")
-    h = hashlib.sha256(open(FW_BIN, 'rb').read()).hexdigest()
-    if h != MK7_FW_SHA:
-        fail("Checksum mismatch: got {}, expected {}".format(h, MK7_FW_SHA))
-    ok("Firmware verified ({} bytes).".format(os.path.getsize(FW_BIN)))
+        ok("All host dependencies satisfied.")
+    except Exception as e:
+        fail("checkDependencies: {}".format(e))
 
 
-def extract_firmware():
-    step("Extracting firmware (binwalk + sasquatch)")
-    if os.path.isdir(EXTRACT):
-        shutil.rmtree(EXTRACT)
-    run(["binwalk", "-eM", "--run-as=root", FW_BIN])
-    if not os.path.isdir(ROOTFS):
-        fail("Extraction did not produce {}".format(ROOTFS))
-    ok("Extracted to {}".format(ROOTFS))
-
-    # Confirm the OpenWrt release matches what we expect
-    rel = os.path.join(ROOTFS, "etc", "openwrt_release")
-    if os.path.exists(rel):
-        for line in open(rel):
-            if line.startswith("DISTRIB_"):
-                cprint("     " + line.rstrip(), 'white')
+def shutil_which(prog):
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        full = os.path.join(p, prog)
+        if os.path.exists(full) and os.access(full, os.X_OK):
+            return full
+    return None
 
 
-def _copy(rel_path):
-    """Copy a file/dir from ROOTFS into the overlay, preserving attributes."""
-    src = os.path.join(ROOTFS, rel_path.lstrip('/'))
-    dst = os.path.join(OVERLAY, rel_path.lstrip('/'))
-    if not os.path.exists(src):
-        warn("Not found in firmware: " + rel_path)
-        return
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    if os.path.isdir(src):
-        if os.path.exists(dst):
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst, symlinks=True)
-    else:
-        shutil.copy2(src, dst, follow_symlinks=False)
+def downloadPineappleFw():
+    try:
+        os.makedirs(WORK_DIR, exist_ok=True)
+
+        if os.path.exists(FW_BIN):
+            cprint('[+] Firmware already downloaded, skipping ...', 'blue')
+        else:
+            cprint('[+] Downloading WiFi Pineapple Mark VII firmware ...',
+                   'blue', attrs=['bold'])
+            cprint('[+] GET {}'.format(MK7_FW_URL), 'cyan')
+            run('wget {} -O {}'.format(MK7_FW_URL, FW_BIN), shell=True)
+
+        if not os.path.exists(FW_BIN):
+            fail("downloadPineappleFw: wget failed (file missing).")
+
+        cprint('[+] Verifying SHA256 ...', 'blue', attrs=['bold'])
+        h = hashlib.sha256(open(FW_BIN, 'rb').read()).hexdigest()
+        if h != MK7_FW_SHA:
+            fail("downloadPineappleFw: SHA256 mismatch.\n"
+                 "    expected {}\n"
+                 "    got      {}".format(MK7_FW_SHA, h))
+
+        ok("WiFi Pineapple Mark VII firmware downloaded and verified.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("downloadPineappleFw: {}".format(e))
 
 
-def build_overlay():
-    step("Building overlay directory")
-    if os.path.isdir(OVERLAY):
-        shutil.rmtree(OVERLAY)
-    os.makedirs(OVERLAY)
+def unpackPineappleFw():
+    try:
+        cprint('[+] Unpacking WiFi Pineapple Mark VII firmware ...',
+               'blue', attrs=['bold'])
 
-    # Directories to copy wholesale
-    for d in [
-        "pineapple",
-        "etc/pineapple",
-        "etc/pineape",
-        "usr/lib/pineapple",
-        "lib/wifi",
-    ]:
-        _copy(d)
+        if os.path.isdir(EXTRACT_DIR):
+            run('rm -rf {}'.format(EXTRACT_DIR), shell=True)
 
-    # Individual files
-    for f in [
-        "etc/pineapple.rc",
-        "etc/config/autossh",
-        "etc/banner",
-        "etc/opkg.conf",
-        "etc/inittab",
-        "etc/rc.local",
-        "etc/shadow",
-        "etc/ssh/sshd_config",
-        "usr/bin/pineap",
-        "usr/bin/aircrack-ng",
-        "usr/sbin/aireplay-ng",
-        "usr/sbin/airodump-ng",
-        "usr/sbin/airmon-ng",
-        "usr/sbin/C2CONNECT",
-        "usr/sbin/C2DISCONNECT",
-        "usr/sbin/C2EXFIL",
-        "usr/sbin/C2GETCONFIG",
-        "usr/sbin/C2NOTIFY",
-        "usr/sbin/cc-client",
-        "usr/sbin/pineapd",
-        "usr/sbin/pineapd_wrapper",
-        "usr/sbin/resetssids",
-        "etc/init.d/atd",
-        "etc/init.d/autossh",
-        "etc/init.d/cc-client",
-        "etc/init.d/pineapd",
-        "etc/init.d/pineapple",
-        "etc/init.d/resetssids",
-        "etc/rc.d/S50atd",
-        "etc/rc.d/S80autossh",
-        "etc/rc.d/S90resetssids",
-        "etc/rc.d/S99cc-client",
-        "etc/rc.d/S99pineapd",
-        "etc/rc.d/S99pineapple",
-        "etc/uci-defaults/04_led_migration",
-        "etc/uci-defaults/90-firewall.sh",
-        "etc/uci-defaults/92-system.sh",
-        "etc/uci-defaults/93-pineap.sh",
-        "etc/uci-defaults/95-network.sh",
-        "etc/uci-defaults/97-pineapple.sh",
-    ]:
-        _copy(f)
+        if pwd.getpwuid(os.getuid())[0] == 'root':
+            run('binwalk -eM {} --run-as=root'.format(FW_BIN), shell=True)
+        else:
+            run('binwalk -eM {}'.format(FW_BIN), shell=True)
 
-    # libwifi symlinks + actual
-    for lib in ["libwifi.so", "libwifi.so.0", "libwifi.so.0.0.5"]:
-        _copy("usr/lib/" + lib)
+        if not os.path.isdir(ROOTFS_DIR):
+            fail("unpackPineappleFw: rootfs not found at {}".format(ROOTFS_DIR))
 
-    ok("Overlay built ({} MB)".format(
-        int(subprocess.check_output(["du","-sm",OVERLAY]).split()[0])))
+        ok("WiFi Pineapple Mark VII firmware unpacked.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("unpackPineappleFw: {}".format(e))
 
 
-def create_uci_wrapper():
-    step("Installing uci wrapper (auto-creates missing radioN sections)")
-    os.makedirs(os.path.join(OVERLAY, "sbin"), exist_ok=True)
-    wrapper = r"""#!/bin/sh
+def extractPineappleOverlay():
+    try:
+        cprint('[+] Extracting Pineapple overlay from MK7 rootfs ...',
+               'blue', attrs=['bold'])
+
+        dirs = [
+            "/pineapple",
+            "/etc/pineapple",
+            "/etc/pineape",
+            "/usr/lib/pineapple",
+            "/lib/wifi",
+        ]
+        files = [
+            "/etc/pineapple.rc",
+            "/etc/config/autossh",
+            "/etc/banner",
+            "/etc/opkg.conf",
+            "/etc/inittab",
+            "/etc/rc.local",
+            "/etc/shadow",
+            "/etc/ssh/sshd_config",
+            "/usr/bin/pineap",
+            "/usr/bin/aircrack-ng",
+            "/usr/sbin/aireplay-ng",
+            "/usr/sbin/airodump-ng",
+            "/usr/sbin/airmon-ng",
+            "/usr/sbin/C2CONNECT",
+            "/usr/sbin/C2DISCONNECT",
+            "/usr/sbin/C2EXFIL",
+            "/usr/sbin/C2GETCONFIG",
+            "/usr/sbin/C2NOTIFY",
+            "/usr/sbin/cc-client",
+            "/usr/sbin/pineapd",
+            "/usr/sbin/pineapd_wrapper",
+            "/usr/sbin/resetssids",
+            "/etc/init.d/atd",
+            "/etc/init.d/autossh",
+            "/etc/init.d/cc-client",
+            "/etc/init.d/pineapd",
+            "/etc/init.d/pineapple",
+            "/etc/init.d/resetssids",
+            "/etc/rc.d/S50atd",
+            "/etc/rc.d/S80autossh",
+            "/etc/rc.d/S90resetssids",
+            "/etc/rc.d/S99cc-client",
+            "/etc/rc.d/S99pineapd",
+            "/etc/rc.d/S99pineapple",
+            "/etc/uci-defaults/04_led_migration",
+            "/etc/uci-defaults/90-firewall.sh",
+            "/etc/uci-defaults/92-system.sh",
+            "/etc/uci-defaults/93-pineap.sh",
+            "/etc/uci-defaults/95-network.sh",
+            "/etc/uci-defaults/97-pineapple.sh",
+            "/usr/lib/libwifi.so",
+            "/usr/lib/libwifi.so.0",
+            "/usr/lib/libwifi.so.0.0.5",
+        ]
+
+        if os.path.isdir(OVERLAY_DIR):
+            run('rm -rf {}'.format(OVERLAY_DIR), shell=True)
+        os.makedirs(OVERLAY_DIR, exist_ok=True)
+
+        for path in dirs + files:
+            src = ROOTFS_DIR + path
+            dst = OVERLAY_DIR + path
+            if not os.path.exists(src):
+                warn("not in rootfs: " + path)
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            run('cp -a {} {}'.format(src, dst), shell=True)
+
+        ok("Overlay extracted.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("extractPineappleOverlay: {}".format(e))
+
+
+def applyPortabilityPatches():
+    try:
+        cprint('[+] Applying portability patches ...', 'blue', attrs=['bold'])
+
+        # ---- 1. uci wrapper ------------------------------------------------
+        os.makedirs(os.path.join(OVERLAY_DIR, "sbin"), exist_ok=True)
+        wrapper = """#!/bin/sh
 # uci wrapper: auto-create wireless.radioN sections when they don't exist.
 # Makes MK7 firmware work on single-radio hardware (MT300N-V2, etc.).
-
 REAL_UCI=/sbin/uci.real
-
 if [ "$1" = "set" ]; then
     key="${2%%=*}"
     case "$key" in
@@ -323,26 +295,25 @@ if [ "$1" = "set" ]; then
             ;;
     esac
 fi
-
 exec "$REAL_UCI" "$@"
 """
-    dest = os.path.join(OVERLAY, "sbin", "uci")
-    with open(dest, "w") as f:
-        f.write(wrapper)
-    os.chmod(dest, 0o755)
+        with open(os.path.join(OVERLAY_DIR, "sbin", "uci"), "w") as f:
+            f.write(wrapper)
+        os.chmod(os.path.join(OVERLAY_DIR, "sbin", "uci"), 0o755)
 
-    # Preserve the real uci binary
-    real = os.path.join(ROOTFS, "sbin", "uci")
-    if os.path.exists(real):
-        shutil.copy2(real, os.path.join(OVERLAY, "sbin", "uci.real"))
-        os.chmod(os.path.join(OVERLAY, "sbin", "uci.real"), 0o755)
-    ok("uci wrapper installed at /sbin/uci (real at /sbin/uci.real)")
+        real_uci_src = os.path.join(ROOTFS_DIR, "sbin", "uci")
+        if os.path.exists(real_uci_src):
+            run('cp -a {} {}'.format(
+                real_uci_src, os.path.join(OVERLAY_DIR, "sbin", "uci.real")),
+                shell=True)
+            os.chmod(os.path.join(OVERLAY_DIR, "sbin", "uci.real"), 0o755)
+            ok("uci wrapper installed → /sbin/uci")
+        else:
+            warn("real uci not found — wrapper may not work")
 
-
-def create_wireless_stub():
-    step("Writing default /etc/config/wireless with radio1 stub")
-    os.makedirs(os.path.join(OVERLAY, "etc", "config"), exist_ok=True)
-    wireless = """config wifi-device 'radio0'
+        # ---- 2. wireless stub with disabled radio1 ------------------------
+        os.makedirs(os.path.join(OVERLAY_DIR, "etc", "config"), exist_ok=True)
+        wireless = """config wifi-device 'radio0'
 \toption type 'mac80211'
 \toption channel '1'
 \toption hwmode '11g'
@@ -376,176 +347,357 @@ config wifi-iface 'default_radio1'
 \toption encryption 'none'
 \toption disabled '1'
 """
-    with open(os.path.join(OVERLAY, "etc", "config", "wireless"), "w") as f:
-        f.write(wireless)
-    ok("wireless stub installed (radio1 disabled)")
+        with open(os.path.join(OVERLAY_DIR, "etc", "config", "wireless"), "w") as f:
+            f.write(wireless)
+        ok("wireless stub installed (radio1 disabled)")
 
+        # ---- 3. rc.local: drop the eMMC sanity check ----------------------
+        rc = os.path.join(OVERLAY_DIR, "etc", "rc.local")
+        if os.path.exists(rc):
+            content = open(rc).read()
+            if "mmcblk0" in content:
+                patched = """#!/bin/ash
 
-def patch_configs():
-    step("Patching rc.local, pineapple.rc, 93-pineap.sh, shadow")
-
-    # 1. rc.local — remove eMMC mmcblk0 sanity check
-    rc = os.path.join(OVERLAY, "etc", "rc.local")
-    content = open(rc).read()
-    patched = r"""#!/bin/ash
-
-# Compile Python Modules
 python3 -m compileall
-
-# Configure WiFi interfaces
 wifi config > /etc/config/wireless
 wifi
 
-# Setup Cron
 mkdir -p /etc/crontabs
 touch /etc/crontabs/root
 /etc/init.d/cron enable
 /etc/init.d/cron start
 
-# Clean up and finish
 rm -rf /etc/pineapple/init
 
-echo -e "bash /etc/pineapple.rc\n\n\n# Enter commands above this line\nexit 0" > /etc/rc.local
+echo -e "bash /etc/pineapple.rc\\n\\n\\n# Enter commands above this line\\nexit 0" > /etc/rc.local
 
 exit 0
 """
-    if "mmcblk0" in content:
-        open(rc, "w").write(patched)
-        ok("rc.local: eMMC check removed")
+                open(rc, "w").write(patched)
+                ok("rc.local: eMMC check removed")
 
-    # 2. pineapple.rc — comment out usb on
-    prc = os.path.join(OVERLAY, "etc", "pineapple.rc")
-    if os.path.exists(prc):
-        c = open(prc).read().replace("\nusb on\n", "\n# usb on\n")
-        open(prc, "w").write(c)
-        ok("pineapple.rc: 'usb on' commented out")
+        # ---- 4. pineapple.rc: neutralize the MK7-only `usb on` ------------
+        prc = os.path.join(OVERLAY_DIR, "etc", "pineapple.rc")
+        if os.path.exists(prc):
+            c = open(prc).read().replace("\nusb on\n", "\n# usb on\n")
+            open(prc, "w").write(c)
+            ok("pineapple.rc: 'usb on' commented out")
 
-    # 3. 93-pineap.sh — wlan1mon → wlan0mon for MT300N-V2
-    pineap = os.path.join(OVERLAY, "etc", "uci-defaults", "93-pineap.sh")
-    if os.path.exists(pineap):
-        c = open(pineap).read().replace("wlan1mon", "wlan0mon")
-        open(pineap, "w").write(c)
-        ok("93-pineap.sh: pineap_interface → wlan0mon")
+        # ---- 5. 93-pineap.sh: wlan1mon → wlan0mon -------------------------
+        pineap = os.path.join(OVERLAY_DIR, "etc", "uci-defaults", "93-pineap.sh")
+        if os.path.exists(pineap):
+            c = open(pineap).read().replace("wlan1mon", "wlan0mon")
+            open(pineap, "w").write(c)
+            ok("93-pineap.sh: pineap_interface → wlan0mon")
 
-    # 4. shadow — set root password
-    shadow = os.path.join(OVERLAY, "etc", "shadow")
-    lines = open(shadow).read().splitlines()
-    newlines = []
-    for line in lines:
-        if line.startswith("root:"):
-            parts = line.split(":")
-            parts[1] = ROOT_PWD_HASH
-            line = ":".join(parts)
-        newlines.append(line)
-    open(shadow, "w").write("\n".join(newlines) + "\n")
-    ok("shadow: root password set ('root')")
+        # ---- 6. shadow: set root password --------------------------------
+        shadow = os.path.join(OVERLAY_DIR, "etc", "shadow")
+        if os.path.exists(shadow):
+            lines = open(shadow).read().splitlines()
+            out = []
+            for line in lines:
+                if line.startswith("root:"):
+                    parts = line.split(":")
+                    parts[1] = ROOT_PWD_HASH
+                    line = ":".join(parts)
+                out.append(line)
+            open(shadow, "w").write("\n".join(out) + "\n")
+            ok("shadow: root password set (root/root)")
 
-
-def download_image_builder():
-    step("Downloading OpenWrt 21.02.1 Image Builder (ramips/mt76x8)")
-    tarball = os.path.join(WORK, "imagebuilder.tar.xz")
-    if not os.path.exists(os.path.join(WORK, IB_DIR)):
-        if not os.path.exists(tarball):
-            run(["wget", "-q", "-O", tarball, IB_URL])
-        run(["tar", "-xf", tarball, "-C", WORK])
-    ok("Image Builder ready")
+        ok("All portability patches applied.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("applyPortabilityPatches: {}".format(e))
 
 
-def patch_prereq_build():
-    step("Patching prereq-build.mk for Python 3.10+")
-    mk = os.path.join(WORK, IB_DIR, "include", "prereq-build.mk")
-    if not os.path.exists(mk):
-        fail("Missing " + mk)
-    c = open(mk).read()
-    if "Python 3\\.[0-9]+" not in c:
+def downloadOpenwrtImageBuilder():
+    try:
+        os.makedirs(WORK_DIR, exist_ok=True)
+
+        if os.path.isdir(IB_DIR):
+            cprint('[+] Image Builder already present, skipping download.',
+                   'blue')
+            return
+
+        cprint('[+] Downloading OpenWrt Image Builder (ramips/mt76x8) ...',
+               'blue', attrs=['bold'])
+        cprint('[+] GET {}'.format(IB_URL), 'cyan')
+
+        if not os.path.exists(IB_TARBALL):
+            run('wget {} -O {}'.format(IB_URL, IB_TARBALL), shell=True)
+
+        if not os.path.exists(IB_TARBALL):
+            fail("downloadOpenwrtImageBuilder: wget failed.")
+
+        ok("OpenWrt Image Builder downloaded.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("downloadOpenwrtImageBuilder: {}".format(e))
+
+
+def extractOpenwrtImageBuilder():
+    try:
+        cprint('[+] Extracting OpenWrt Image Builder ...',
+               'blue', attrs=['bold'])
+        run('tar -xf {} -C {}'.format(IB_TARBALL, WORK_DIR), shell=True)
+        if not os.path.isdir(IB_DIR):
+            fail("extractOpenwrtImageBuilder: extraction failed.")
+        ok("OpenWrt Image Builder extracted.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("extractOpenwrtImageBuilder: {}".format(e))
+
+
+def patchPrereqBuild():
+    try:
+        cprint('[+] Patching prereq-build.mk for Python 3.12+ ...',
+               'blue', attrs=['bold'])
+        mk = os.path.join(IB_DIR, "include", "prereq-build.mk")
+        if not os.path.exists(mk):
+            warn("prereq-build.mk not found — skipping")
+            return
+
+        c = open(mk).read()
+
+        # Widen Python version regex
         c = c.replace(r"Python 3\.([5-9]|10)\.?", r"Python 3\.[0-9]+")
+
+        # Disable distutils host check (removed in Python 3.12+)
+        lines = c.splitlines()
+        out = []
+        for ln in lines:
+            if ("TestHostCommand,python3-distutils" in ln
+                    and not ln.strip().startswith("#")):
+                out.append("#" + ln)
+            else:
+                out.append(ln)
+        c = "\n".join(out) + "\n"
         open(mk, "w").write(c)
-        ok("Python version regex widened")
-    # Disable the distutils host check (removed in Python 3.12+)
-    lines = c.splitlines()
-    out = []
-    for ln in lines:
-        if "TestHostCommand,python3-distutils" in ln:
-            out.append("#" + ln)
+        ok("prereq-build.mk patched.")
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("patchPrereqBuild: {}".format(e))
+
+
+def buildCustomPineappleImage(target):
+    try:
+        cprint('[+] Building custom WiFi Pineapple Mark VII firmware for {} ...'
+               .format(target), 'blue', attrs=['bold'])
+
+        pkgs = (
+            "at autossh base-files bash blockd block-mount busybox "
+            "ca-bundle ca-certificates coreutils coreutils-base64 "
+            "coreutils-sleep curl dbus dnsmasq e2fsprogs ebtables ethtool "
+            "file firewall fstools fwtool getrandom glib2 "
+            "hostapd-common hostapd-utils ip6tables iptables "
+            "iptables-mod-ipmark iptables-mod-ipopt iw iwinfo jshn "
+            "jsonfilter kmod-bluetooth kmod-cfg80211 kmod-crypto-aead "
+            "kmod-crypto-cmac kmod-crypto-crc32c kmod-crypto-ecb "
+            "kmod-crypto-ecdh kmod-crypto-hash kmod-crypto-kpp "
+            "kmod-crypto-manager kmod-crypto-null kmod-crypto-pcompress "
+            "kmod-ebtables kmod-fs-autofs4 kmod-fs-ext4 kmod-fs-ntfs "
+            "kmod-fs-vfat kmod-fuse kmod-gpio-button-hotplug kmod-hid "
+            "kmod-i2c-core kmod-i2c-mt7628 kmod-input-core kmod-input-evdev "
+            "kmod-ip6tables kmod-ipt-compat-xtables kmod-ipt-conntrack "
+            "kmod-ipt-core kmod-ipt-ipmark kmod-ipt-ipopt kmod-ipt-nat "
+            "kmod-ipt-offload kmod-leds-gpio kmod-lib-crc16 "
+            "kmod-lib-crc-ccitt kmod-libphy kmod-mac80211 kmod-mii "
+            "kmod-mmc kmod-mt76 kmod-mt7601u kmod-mt7603 kmod-mt76-core "
+            "kmod-mt76-usb kmod-mt76x02-common kmod-mt76x02-usb kmod-mt76x2 "
+            "kmod-mt76x2-common kmod-mt76x2u kmod-nf-conntrack "
+            "kmod-nf-conntrack6 kmod-nf-flow kmod-nf-ipt kmod-nf-ipt6 "
+            "kmod-nf-nat kmod-nf-reject kmod-nf-reject6 kmod-nls-base "
+            "kmod-nls-cp437 kmod-nls-iso8859-1 kmod-nls-utf8 kmod-ppp "
+            "kmod-pppoe kmod-pppox kmod-regmap-core kmod-scsi-core "
+            "kmod-sdhci kmod-sdhci-mt7620 kmod-slhc kmod-usb2 "
+            "kmod-usb-acm kmod-usb-core kmod-usb-ehci kmod-usb-net "
+            "kmod-usb-net-asix kmod-usb-net-asix-ax88179 "
+            "kmod-usb-net-rtl8152 kmod-usb-ohci kmod-usb-storage "
+            "libatomic1 libattr libblkid1 libblobmsg-json20210516 "
+            "libbz2-1.0 libc libcbor0 libcomerr0 libcurl4 libdbus libelf1 "
+            "libevdev libexpat libext2fs2 libffi libfido2-1 libgcc1 "
+            "libgmp10 libgnutls libical libip4tc2 libip6tc2 "
+            "libiwinfo20210430 libiwinfo-data libjson-c5 "
+            "libjson-script20210516 liblzma libmagic libmbedtls12 "
+            "libncurses6 libnettle8 libnghttp2-14 libnl-core200 "
+            "libnl-genl200 libnl-tiny1 libopenssl1.1 libopenssl-conf "
+            "libpcap1 libpcre libpthread libpython3-3.9 libreadline8 "
+            "librt libsqlite3-0 libss2 libstdcpp6 libubox20210516 "
+            "libubus20210630 libuci20130104 libuclient20201210 "
+            "libudev-zero libusb-1.0-0 libustream-openssl20201210 "
+            "libuuid1 libxtables12 logd macchanger msmtp "
+            "mt7601u-firmware mtd nano netifd ntfs-3g odhcp6c "
+            "odhcpd-ipv6only openssh-client openssh-client-utils "
+            "openssh-keygen openssh-server openssh-sftp-server "
+            "openssl-util openwrt-keyring opkg ppp ppp-mod-pppoe "
+            "procd procps-ng procps-ng-free procps-ng-kill "
+            "procps-ng-pgrep procps-ng-pkill procps-ng-ps "
+            "procps-ng-snice procps-ng-top procps-ng-uptime "
+            "procps-ng-watch protobuf-lite python3-base python3-codecs "
+            "python3-email python3-light python3-logging python3-openssl "
+            "python3-urllib swconfig tcpdump terminfo ubox ubus "
+            "ubusd uci uclibcxx uclient-fetch urandom-seed urngd "
+            "usbids usbutils usign vim wireless-regdb wireless-tools "
+            "wpad zlib "
+            "-libustream-wolfssl -libustream-wolfssl20201210 "
+            "-wpad-basic -wpad-basic-wolfssl -wpad-basic-mbedtls "
+            "-wpad-wolfssl -wpad-mbedtls"
+        )
+
+        # FILES= must point to the overlay's PARENT (Image Builder quirk)
+        overlay_parent = os.path.dirname(OVERLAY_DIR) + "/"
+
+        cmd = ('make -C "{ib}" image '
+               'PROFILE={prof} '
+               'PACKAGES="{pkgs}" '
+               'FILES="{ovl}"').format(
+                    ib=IB_DIR, prof=PROFILE, pkgs=pkgs, ovl=overlay_parent)
+
+        cprint('[+] {}'.format(cmd), 'cyan')
+
+        env = dict(os.environ)
+        if os.geteuid() != 0:
+            env["SUDO"] = "sudo"
+            result = run(["sudo", "bash", "-c", cmd], env=env)
         else:
-            out.append(ln)
-    open(mk, "w").write("\n".join(out) + "\n")
-    ok("python3-distutils check disabled")
+            result = run(cmd, shell=True, env=env)
+
+        if result.returncode != 0:
+            fail("buildCustomPineappleImage: make failed "
+                 "with code {}".format(result.returncode))
+
+        cprint('[PIN] Congratulations! Firmware for {} compiled successfully.'
+               .format(target), 'green', attrs=['bold'])
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("buildCustomPineappleImage: {}".format(e))
 
 
-def build_image():
-    step("Building custom firmware ({} → {})".format(PROFILE, "MT300N-V2"))
-    ib = os.path.join(WORK, IB_DIR)
-    overlay_abs = OVERLAY
-    cmd = (
-        'make -C "{ib}" image '
-        'PROFILE={profile} '
-        'PACKAGES="{pkgs}" '
-        'FILES="{ovl}/"'
-    ).format(ib=ib, profile=PROFILE, pkgs=PACKAGE_LIST, ovl=overlay_abs)
-    cprint("     " + cmd, 'white')
-    r = run(cmd)
-    if r.returncode != 0:
-        fail("Build failed with code {}".format(r.returncode))
-    ok("Image built")
+def collectOutput(target):
+    try:
+        cprint('[+] Collecting output ...', 'blue', attrs=['bold'])
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+        src = os.path.join(IB_DIR, "bin", "targets", "ramips", "mt76x8")
+        if not os.path.isdir(src):
+            fail("collectOutput: image directory missing: " + src)
+
+        for f in os.listdir(src):
+            if (f.endswith(".bin") or f.endswith(".manifest")
+                    or f == "sha256sums"):
+                run('cp -a {} {}'.format(os.path.join(src, f), OUTPUT_DIR),
+                    shell=True)
+
+        ok("Firmware in {}".format(OUTPUT_DIR))
+        for f in sorted(os.listdir(OUTPUT_DIR)):
+            path = os.path.join(OUTPUT_DIR, f)
+            cprint("    {:<72} {} bytes".format(
+                f, os.path.getsize(path)), 'white')
+    except SystemExit:
+        raise
+    except Exception as e:
+        fail("collectOutput: {}".format(e))
 
 
-def collect_output():
-    step("Collecting output images")
-    out = os.path.abspath("./output")
-    os.makedirs(out, exist_ok=True)
-    src = os.path.join(WORK, IB_DIR, "bin", "targets", "ramips", "mt76x8")
-    if not os.path.isdir(src):
-        fail("Image directory missing: " + src)
-    for f in os.listdir(src):
-        if f.endswith(".bin") or f.endswith(".manifest") or f == "sha256sums":
-            shutil.copy2(os.path.join(src, f), out)
-    for f in sorted(os.listdir(out)):
-        cprint("     {:<70} {} bytes".format(
-            f, os.path.getsize(os.path.join(out, f))), 'white')
-    ok("Output in ./output/")
+def cleaning(target):
+    try:
+        cprint('[+] Cleaning intermediate files ...', 'blue', attrs=['bold'])
+
+        for p in [IB_TARBALL, EXTRACT_DIR, IB_DIR]:
+            if os.path.isdir(p):
+                run('rm -rf {}'.format(p), shell=True)
+            elif os.path.isfile(p):
+                os.remove(p)
+
+        cprint('\n\n[INFO] Custom firmware: {}'.format(OUTPUT_DIR),
+               'cyan', attrs=['bold'])
+        cprint('[INFO] Flash on {} via Breed bootloader — firmware layout.'
+               .format(target), 'cyan', attrs=['bold'])
+        cprint('[WARN] Do NOT flash the Hak5 recovery image on MT300N-V2.',
+               'yellow', attrs=['bold'])
+        cprint('[WARN] Back up Breed eeprom.bin before flashing!',
+               'yellow', attrs=['bold'])
+        cprint('[NOTE] Blog post: https://samy.link/blog/'
+               'build-your-own-wifi-pineapple-tetra-for-7\n',
+               'cyan', attrs=['bold'])
+    except SystemExit:
+        raise
+    except Exception as e:
+        warn("cleaning: {}".format(e))
 
 
-def cleanup():
-    step("Cleaning intermediate files")
-    for p in [os.path.join(WORK, "imagebuilder.tar.xz"),
-              os.path.join(WORK, "_mk7_fw.bin.extracted"),
-              os.path.join(WORK, IB_DIR)]:
-        if os.path.isdir(p):
-            shutil.rmtree(p)
-        elif os.path.isfile(p):
-            os.remove(p)
-    ok("Done")
+# ---------------------------------------------------------------------------
+# Target selection (no external menu library)
+# ---------------------------------------------------------------------------
 
+def selectTarget():
+    choices = [
+        ("1", "mt300n-v2",      "GL.iNet MT300N-V2 (32 MB flash, single 2.4 GHz radio)"),
+        ("2", "mt300n-v2-mini", "GL.iNet MT300N-V2 Mini"),
+        ("3", "generic-mt7628", "Generic MT7628 single-radio board"),
+    ]
+
+    print("")
+    cprint("  +-- SELECT TARGET ---------------------------------------------+",
+           'cyan', attrs=['bold'])
+    for key, name, desc in choices:
+        cprint("  | [{}] {:<17} {}".format(key, name, desc),
+               'white')
+    cprint("  +---------------------------------------------------------------+",
+           'cyan', attrs=['bold'])
+
+    while True:
+        try:
+            ans = input("  ? Choose target [1-3]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        for key, name, _ in choices:
+            if ans == key or ans == name:
+                return {"target": name}
+        cprint("  [!] Invalid selection.", 'yellow')
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main():
     banner()
-    cprint("Hi there — let's bake a Mark VII firmware for your MT7628 router.\n",
-           'cyan', attrs=['bold'])
+    print('[+] Hi there, let\'s cook a nice and tasty pineapple cake!\n')
     time.sleep(1)
 
     try:
-        check_dependencies()
-        download_firmware()
-        extract_firmware()
-        build_overlay()
-        create_uci_wrapper()
-        create_wireless_stub()
-        patch_configs()
-        download_image_builder()
-        patch_prereq_build()
-        build_image()
-        collect_output()
-        cleanup()
-
-        cprint("\n[🍍] Firmware ready — flash from Breed as 'firmware' layout.\n",
+        answer = selectTarget()
+        target = answer['target']
+        cprint('[OK] Target {} selected.'.format(target),
                'green', attrs=['bold'])
-        cprint("[!]  No recovery-image step is required for the MT300N-V2.",
-               'yellow', attrs=['bold'])
-        cprint("[!]  Back up Breed eeprom.bin before flashing.\n",
-               'yellow', attrs=['bold'])
+
+        checkDependencies()
+        downloadPineappleFw()
+        unpackPineappleFw()
+        extractPineappleOverlay()
+        applyPortabilityPatches()
+        downloadOpenwrtImageBuilder()
+        extractOpenwrtImageBuilder()
+        patchPrereqBuild()
+        buildCustomPineappleImage(target)
+        collectOutput(target)
+        cleaning(target)
+
+    except SystemExit:
+        raise
     except KeyboardInterrupt:
-        cprint("\n[!] Interrupted.", 'red', attrs=['bold'])
+        print('\n[!] Interrupted.\n')
+        sys.exit(1)
+    except Exception as e:
+        print('\n[!] See you soon for a new adventure!\n')
+        print("    " + str(e) + "\n")
         sys.exit(1)
 
 
